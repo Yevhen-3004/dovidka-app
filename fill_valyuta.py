@@ -253,24 +253,41 @@ def build_zayava_pdf(params):
     doc.save(out_docx)
 
     # ── Конвертація docx → PDF через LibreOffice ─────────────────────────────
-    lo_bin = None
-    for candidate in ["libreoffice", "soffice",
-                       "/usr/bin/libreoffice", "/usr/bin/soffice",
-                       "/usr/lib/libreoffice/program/soffice"]:
-        if shutil.which(candidate) or os.path.isfile(candidate):
-            lo_bin = candidate
-            break
+    def _find_lo():
+        # 1. Пряма перевірка відомих шляхів
+        for path in ["/usr/bin/libreoffice", "/usr/bin/soffice",
+                     "/usr/lib/libreoffice/program/soffice",
+                     "/opt/libreoffice7.6/program/soffice",
+                     "/opt/libreoffice/program/soffice"]:
+            if os.path.isfile(path):
+                return path
+        # 2. Через shutil.which (залежить від PATH)
+        for name in ["libreoffice", "soffice"]:
+            found = shutil.which(name)
+            if found:
+                return found
+        # 3. Через find
+        try:
+            r = subprocess.run(["find", "/usr", "/opt", "-name", "soffice",
+                                 "-type", "f"], capture_output=True, text=True, timeout=10)
+            for line in r.stdout.strip().splitlines():
+                if line.strip():
+                    return line.strip()
+        except Exception:
+            pass
+        return None
 
+    lo_bin = _find_lo()
     if not lo_bin:
-        raise RuntimeError("LibreOffice не знайдено")
+        raise RuntimeError("LibreOffice не знайдено. Встановіть: apt-get install libreoffice")
 
     env = os.environ.copy()
-    env["HOME"] = tmpdir  # уникаємо конфліктів профілів
+    env["HOME"] = tmpdir
 
     subprocess.run(
         [lo_bin, "--headless", "--norestore",
          "--convert-to", "pdf", "--outdir", tmpdir, out_docx],
-        check=True, capture_output=True, timeout=60, env=env
+        check=True, capture_output=True, timeout=90, env=env
     )
 
     # LibreOffice зберігає як zayava.pdf

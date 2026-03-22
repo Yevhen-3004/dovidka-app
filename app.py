@@ -392,6 +392,18 @@ def parse_request():
     }
 
 
+@app.route("/health")
+def health():
+    import shutil, os
+    lo = shutil.which("libreoffice") or shutil.which("soffice")
+    lo_file = os.path.isfile("/usr/bin/libreoffice")
+    return jsonify({
+        "status": "ok",
+        "libreoffice_which": lo,
+        "libreoffice_file": lo_file,
+        "path": os.environ.get("PATH",""),
+    })
+
 @app.route("/")
 def index():
     return render_template_string(HTML)
