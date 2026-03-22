@@ -370,14 +370,7 @@ def build_dovidka(pib, ipn, doc_date, balance_line):
 def build_zayava(params):
     sys.path.insert(0,BASE_DIR)
     import fill_valyuta as fv
-    tmpdir=tempfile.mkdtemp()
-    out_docx=os.path.join(tmpdir,"v.docx")
-    out_pdf =os.path.join(tmpdir,"v.pdf")
-    fv.fill_template(params,TEMPLATE_VALYUTA,out_docx)
-    fv.docx_to_pdf(out_docx,out_pdf)
-    with open(out_pdf,"rb") as f: data=f.read()
-    import shutil; shutil.rmtree(tmpdir)
-    return data
+    return fv.build_zayava_pdf(params)
 
 
 def parse_request():

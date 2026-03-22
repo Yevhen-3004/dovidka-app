@@ -1,18 +1,19 @@
 """
-fill_valyuta.py — заповнює шаблон заяви на купівлю валюти (docx → pdf)
-Без залежностей від зовнішніх скриптів — тільки стандартна бібліотека Python.
+fill_valyuta.py — заповнює оригінальний шаблон через python-docx,
+конвертує у PDF через LibreOffice напряму.
 """
-import re, shutil, subprocess, sys, os, tempfile, zipfile
+import copy, io, os, re, shutil, subprocess, tempfile
 from datetime import date
-from lxml import etree
+from docx import Document
+from docx.oxml.ns import qn
 
 MONTHS_UK = {
     1:"січня",2:"лютого",3:"березня",4:"квітня",
     5:"травня",6:"червня",7:"липня",8:"серпня",
     9:"вересня",10:"жовтня",11:"листопада",12:"грудня",
 }
-CURRENCY_CODES = {"USD":"840","EUR":"978"}
-CURRENCY_NAMES = {"USD":"Долар США","EUR":"Євро"}
+CURRENCY_CODES    = {"USD":"840","EUR":"978"}
+CURRENCY_NAMES_UK = {"USD":"Долар США","EUR":"Євро"}
 
 
 def get_date_parts(date_str):
@@ -24,226 +25,288 @@ def get_date_parts(date_str):
     return str(d), MONTHS_UK[m], str(y)
 
 
-def replace_text_in_cell(content, old_text, new_text):
-    pattern = r'(<w:t[^>]*>)' + re.escape(old_text) + r'(</w:t>)'
-    return re.sub(pattern, r'\g<1>' + new_text.replace('\\',r'\\') + r'\g<2>', content)
+def set_cell_text(cell, new_text):
+    """Замінює текст у клітинці зберігаючи форматування першого run."""
+    for para in cell.paragraphs:
+        if not para.runs:
+            continue
+        # Зберігаємо форматування першого run
+        first_run = para.runs[0]
+        rpr = copy.deepcopy(first_run._r.find(qn('w:rPr')))
+        # Очищаємо всі runs
+        for run in para.runs:
+            run._r.getparent().remove(run._r)
+        # Додаємо один новий run
+        from docx.oxml import OxmlElement
+        r = OxmlElement('w:r')
+        if rpr is not None:
+            r.append(copy.deepcopy(rpr))
+        t = OxmlElement('w:t')
+        t.text = new_text
+        if new_text.startswith(' ') or new_text.endswith(' '):
+            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        r.append(t)
+        para._p.append(r)
+        return  # тільки перший параграф
 
 
-def replace_individual_digits(content, start_marker_text, old_digits, new_digits, occurrence=0):
-    wt_pattern = re.compile(r'<w:t(?:[^>]*)>([^<]*)</w:t>')
-    all_matches = list(wt_pattern.finditer(content))
-    marker_indices = [i for i,m in enumerate(all_matches) if start_marker_text in m.group(1)]
-    if occurrence >= len(marker_indices):
-        return content
-    start_idx = marker_indices[occurrence] + 1
-    replacements = []
-    old_pos = new_pos = 0
-    i = start_idx
-    while old_pos < len(old_digits) and i < len(all_matches):
-        cell_text = all_matches[i].group(1)
-        if cell_text == old_digits[old_pos]:
-            if new_pos < len(new_digits):
-                orig = all_matches[i].group(0)
-                repl = orig.replace(f'>{old_digits[old_pos]}<', f'>{new_digits[new_pos]}<', 1)
-                replacements.append((all_matches[i].start(), all_matches[i].end(), repl))
-            old_pos += 1; new_pos += 1
-        i += 1
-    for start,end,new_val in reversed(replacements):
-        content = content[:start] + new_val + content[end:]
-    return content
-
-
-def iban_to_digits(iban):
-    return list(iban.replace(" ","").replace("-",""))
-
-
-def amount_to_digits(amount_str):
-    try:
-        val = float(amount_str)
-        int_part = str(int(val))
-        dec_part = f"{val:.2f}".split('.')[1]
-        return list(int_part) + [','] + list(dec_part)
-    except Exception:
-        return list(amount_str)
-
-
-# ── Розпакування / запакування docx без зовнішніх скриптів ──────────────────
-
-def unpack_docx(docx_path, out_dir):
-    """Розпаковує docx (zip) у папку."""
-    os.makedirs(out_dir, exist_ok=True)
-    with zipfile.ZipFile(docx_path, 'r') as z:
-        z.extractall(out_dir)
-
-
-def pack_docx(src_dir, output_path, original_path):
-    """Пакує папку назад у docx."""
-    # Беремо список файлів із оригінального архіву щоб зберегти порядок
-    with zipfile.ZipFile(original_path, 'r') as orig_z:
-        orig_names = orig_z.namelist()
-
-    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # Спочатку файли з оригінального архіву (в тому ж порядку)
-        for name in orig_names:
-            file_path = os.path.join(src_dir, name.replace('/', os.sep))
-            if os.path.isfile(file_path):
-                zf.write(file_path, name)
-        # Потім будь-які нові файли яких не було в оригіналі
-        for root, dirs, files in os.walk(src_dir):
-            for fname in files:
-                fpath = os.path.join(root, fname)
-                arcname = os.path.relpath(fpath, src_dir).replace(os.sep, '/')
-                if arcname not in orig_names:
-                    zf.write(fpath, arcname)
-
-
-def find_libreoffice():
-    """Шукає виконуваний файл LibreOffice."""
-    candidates = [
-        "libreoffice", "soffice",
-        "/usr/bin/libreoffice", "/usr/bin/soffice",
-        "/usr/lib/libreoffice/program/soffice",
-        "/opt/libreoffice/program/soffice",
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    ]
-    for c in candidates:
-        try:
-            r = subprocess.run([c,"--version"], capture_output=True, timeout=5)
-            if r.returncode == 0:
-                return c
-        except Exception:
-            pass
+def find_cell_with_text(table, text):
+    """Знаходить першу клітинку з точним текстом."""
+    for row in table.rows:
+        for cell in row.cells:
+            if cell.text.strip() == text:
+                return cell
     return None
 
 
-def docx_to_pdf(docx_path, output_pdf):
-    """Конвертує docx → pdf через LibreOffice."""
-    lo = find_libreoffice()
-    if not lo:
-        raise RuntimeError("LibreOffice не знайдено. Встановіть: apt-get install libreoffice")
-    out_dir = os.path.dirname(output_pdf)
-    subprocess.run(
-        [lo, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
-        check=True, capture_output=True, timeout=60
-    )
-    base = os.path.splitext(os.path.basename(docx_path))[0]
-    generated = os.path.join(out_dir, base + ".pdf")
-    if os.path.exists(generated) and generated != output_pdf:
-        shutil.move(generated, output_pdf)
-    return output_pdf
+def replace_in_cell(table, old_text, new_text):
+    """Замінює текст у всіх клітинках таблиці де він співпадає."""
+    replaced = 0
+    for row in table.rows:
+        for cell in row.cells:
+            if cell.text.strip() == old_text:
+                set_cell_text(cell, new_text)
+                replaced += 1
+    return replaced
 
 
-# ── Основна функція заповнення шаблону ──────────────────────────────────────
+def replace_iban_in_table(table, old_iban, new_iban):
+    """Замінює цифри IBAN в таблиці (кожна цифра — окрема клітинка)."""
+    old_chars = list(old_iban.replace(" ",""))
+    new_chars = list(new_iban.replace(" ","").ljust(len(old_chars)))[:len(old_chars)]
+    # Збираємо всі клітинки таблиці в порядку
+    all_cells = []
+    for row in table.rows:
+        for cell in row.cells:
+            all_cells.append(cell)
+    # Шукаємо послідовність
+    texts = [c.text.strip() for c in all_cells]
+    for i in range(len(texts) - len(old_chars)):
+        if texts[i:i+len(old_chars)] == old_chars:
+            for j, ch in enumerate(new_chars):
+                set_cell_text(all_cells[i+j], ch)
+            return True
+    return False
 
-def fill_template(params, template_path, output_docx):
+
+def replace_amount_in_table(table, old_digits, new_amount_str):
+    """Замінює цифри суми в таблиці."""
+    try:
+        val = float(new_amount_str)
+        int_p = str(int(val))
+        dec_p = f"{val:.2f}".split(".")[1]
+        new_chars = list(int_p) + [","] + list(dec_p)
+    except Exception:
+        return False
+    old_chars = old_digits
+    # Вирівнюємо довжину
+    while len(new_chars) < len(old_chars):
+        new_chars.insert(0, " ")
+    new_chars = new_chars[-len(old_chars):]
+
+    all_cells = []
+    for row in table.rows:
+        for cell in row.cells:
+            all_cells.append(cell)
+    texts = [c.text.strip() for c in all_cells]
+    for i in range(len(texts) - len(old_chars)):
+        if texts[i:i+len(old_chars)] == old_chars:
+            for j, ch in enumerate(new_chars):
+                set_cell_text(all_cells[i+j], ch if ch.strip() else " ")
+            return True
+    return False
+
+
+def replace_run_text(doc, old_text, new_text):
+    """Замінює текст у всіх параграфах документа (поза таблицями)."""
+    for para in doc.paragraphs:
+        if old_text in para.text:
+            for run in para.runs:
+                if old_text in run.text:
+                    run.text = run.text.replace(old_text, new_text)
+
+
+def replace_date_in_header(table, day, month_uk, year):
+    """Замінює дату у рядку заголовка."""
+    for row in table.rows:
+        for cell in row.cells:
+            for para in cell.paragraphs:
+                full = para.text
+                if 'ВІД/DATED' in full and 'березня' in full:
+                    # Замінюємо у runs
+                    for run in para.runs:
+                        run.text = run.text.replace('23', day, 1) if '23' in run.text else run.text
+                        run.text = run.text.replace('березня', month_uk) if 'березня' in run.text else run.text
+                        run.text = run.text.replace('2026', year) if '2026' in run.text else run.text
+                    return True
+    return False
+
+
+def build_zayava_pdf(params):
+    """Заповнює шаблон і повертає PDF bytes."""
+    template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "template_valyuta.docx")
     tmpdir = tempfile.mkdtemp()
-    unpack_dir = os.path.join(tmpdir, "unpacked")
+    out_docx = os.path.join(tmpdir, "zayava.docx")
+    out_pdf  = os.path.join(tmpdir, "zayava.pdf")
 
-    unpack_docx(template_path, unpack_dir)
-
-    doc_path = os.path.join(unpack_dir, "word", "document.xml")
-    content = open(doc_path, encoding="utf-8").read()
-
-    pib = params["pib"]
-    pib_parts = pib.split()
-    ipn = params["ipn"]
-    address = params["address"]
-    day, month_uk, year = get_date_parts(params.get("date",""))
-    purpose_uk = params["purpose_uk"]
-    amount = params["amount"]
-    currency = params["currency"]
-    cur_code = CURRENCY_CODES.get(currency,"840")
-    iban_debit = params["iban_debit"].replace(" ","")
+    pib         = params["pib"]
+    pib_parts   = pib.split()
+    ipn         = params["ipn"]
+    address     = params["address"]
+    purpose_uk  = params["purpose_uk"]
+    amount      = params["amount"]
+    currency    = params["currency"]
+    cur_code    = CURRENCY_CODES.get(currency,"840")
+    cur_name_uk = CURRENCY_NAMES_UK.get(currency,"Долар США")
+    iban_debit  = params["iban_debit"].replace(" ","")
     iban_credit = params["iban_credit"].replace(" ","")
-    iban_commission = params["iban_commission"].replace(" ","")
+    iban_comm   = params["iban_commission"].replace(" ","")
+    day, month_uk, year = get_date_parts(params.get("date",""))
 
-    OLD_PIB_PARTS = ["Каллаш","Леонід","Юрійович"]
-    OLD_IPN = "3073810850"
-    OLD_ADDRESS_1 = "Україна, м. Київ, пров. Костя Гордієнка, буд."
-    OLD_ADDRESS_2 = "10, кв. 7"
-    OLD_DAY = "23"; OLD_MONTH = "березня"; OLD_YEAR = "2026"
-    OLD_AMOUNT_DIGITS = ["5","8","0","0",",","0","0"]
-    OLD_CUR_CODE_DIGITS = ["8","4","0"]
-    OLD_IBAN1 = list("UA293220010000026006310115156")
-    OLD_IBAN2 = list("UA353220010000026000370076190")
-    OLD_IBAN3 = list("UA293220010000026006310115156")
+    doc = Document(template_path)
+    tables = doc.tables
 
-    # 1. Дата
-    content = replace_text_in_cell(content, OLD_DAY, day)
-    content = replace_text_in_cell(content, OLD_MONTH, month_uk)
-    content = replace_text_in_cell(content, OLD_YEAR, year)
+    # ── T0: Заголовок, дата, клієнт ─────────────────────────────────────────
+    t0 = tables[0]
 
-    # 2. ПІБ (3 окремі runs вгорі + внизу)
-    for i,old_part in enumerate(OLD_PIB_PARTS):
-        new_part = pib_parts[i] if i < len(pib_parts) else ""
-        content = replace_text_in_cell(content, old_part, new_part)
+    # Дата
+    replace_date_in_header(t0, day, month_uk, year)
 
-    # 3. Адреса
-    content = replace_text_in_cell(content, OLD_ADDRESS_1, address)
-    content = replace_text_in_cell(content, OLD_ADDRESS_2, " ")
+    # ПІБ клієнта
+    for row in t0.rows:
+        for cell in row.cells:
+            txt = cell.text.strip()
+            if txt == "ФОП Каллаш Леонід Юрійович":
+                set_cell_text(cell, f"ФОП {pib}")
+            elif "Костя Гордієнка" in txt or txt == "Україна, м. Київ, пров. Костя Гордієнка, буд. 10, кв. 7":
+                set_cell_text(cell, address)
+            elif txt == "3073810850":
+                set_cell_text(cell, ipn)
 
-    # 4. ІПН
-    content = replace_text_in_cell(content, OLD_IPN, ipn)
+    # ── T1: Мета купівлі ─────────────────────────────────────────────────────
+    t1 = tables[1]
+    for row in t1.rows:
+        for cell in row.cells:
+            txt = cell.text.strip()
+            if txt not in ("Мета купівлі/ Purpose\nof purchase",
+                           "Мета купівлі/ Purpose", "of purchase") \
+               and "Мета купівлі" not in txt and len(txt) > 10:
+                set_cell_text(cell, purpose_uk)
 
-    # 5. Мета купівлі (українська) — замінюємо перший run, решту очищаємо
-    wt_pattern = re.compile(r'(<w:t(?:[^>]*)>)([^<]*)(</w:t>)')
-    all_wt = list(wt_pattern.finditer(content))
-    purpose_start = next((i for i,m in enumerate(all_wt) if m.group(2)=="Передплата"), None)
-    if purpose_start is not None:
-        m0 = all_wt[purpose_start]
-        content = content[:m0.start()] + m0.group(1) + purpose_uk + m0.group(3) + content[m0.end():]
-        all_wt = list(wt_pattern.finditer(content))
-        purpose_start = next((i for i,m in enumerate(all_wt) if m.group(2)==purpose_uk), purpose_start)
-        i = purpose_start + 1
-        replacements = []
-        while i < len(all_wt):
-            if "(Оплата/передплата" in all_wt[i].group(2):
+    # ── T2: Сума, валюта, IBAN 1 ─────────────────────────────────────────────
+    t2 = tables[2]
+
+    # Сума — старі цифри ["5","8","0","0",",","0","0"]
+    replace_amount_in_table(t2, ["5","8","0","0",",","0","0"], amount)
+
+    # Код валюти — старі ["8","4","0"]
+    old_cur = list(CURRENCY_CODES.get("USD","840"))
+    new_cur = list(cur_code.ljust(3))
+    all_cells = []
+    for row in t2.rows:
+        for cell in row.cells:
+            all_cells.append(cell)
+    texts = [c.text.strip() for c in all_cells]
+    for i in range(len(texts)-3):
+        if texts[i:i+3] == old_cur:
+            for j,ch in enumerate(new_cur):
+                set_cell_text(all_cells[i+j], ch)
+            break
+
+    # Назва валюти
+    for row in t2.rows:
+        for cell in row.cells:
+            if cell.text.strip() == "Долар США":
+                set_cell_text(cell, cur_name_uk)
                 break
-            if all_wt[i].group(2).strip():
-                replacements.append((all_wt[i].start(), all_wt[i].end(),
-                                      all_wt[i].group(1) + "" + all_wt[i].group(3)))
-            i += 1
-        for s,e,v in reversed(replacements):
-            content = content[:s] + v + content[e:]
 
-    # 6. Сума
-    content = replace_individual_digits(content,"купівлі",OLD_AMOUNT_DIGITS,
-                                        amount_to_digits(amount),occurrence=1)
+    # IBAN 1 (в T2)
+    replace_iban_in_table(t2,
+        "UA293220010000026006310115156",
+        iban_debit)
 
-    # 7. Код валюти
-    content = replace_individual_digits(content,"Currency",OLD_CUR_CODE_DIGITS,
-                                        list(cur_code),occurrence=0)
+    # ── T3: IBAN 2 ───────────────────────────────────────────────────────────
+    replace_iban_in_table(tables[3],
+        "UA353220010000026000370076190",
+        iban_credit)
 
-    # 8. Назва валюти
-    if currency == "EUR":
-        content = replace_text_in_cell(content,"Долар","Євро")
-        content = replace_text_in_cell(content,"США"," ")
+    # ── T4: IBAN 3 ───────────────────────────────────────────────────────────
+    replace_iban_in_table(tables[4],
+        "UA293220010000026006310115156",
+        iban_comm)
 
-    # 9-11. IBAN
-    content = replace_individual_digits(content,"IBAN",OLD_IBAN1,iban_to_digits(iban_debit),occurrence=0)
-    content = replace_individual_digits(content,"IBAN",OLD_IBAN2,iban_to_digits(iban_credit),occurrence=1)
-    content = replace_individual_digits(content,"IBAN",OLD_IBAN3,iban_to_digits(iban_commission),occurrence=2)
+    # ── T5: Підпис (ПІБ внизу) ───────────────────────────────────────────────
+    t5 = tables[5]
+    for row in t5.rows:
+        for cell in row.cells:
+            if "Каллаш Леонід Юрійович" in cell.text:
+                # Зберігаємо "М.П./Seal\n" + новий ПІБ
+                for para in cell.paragraphs:
+                    if "Каллаш" in para.text:
+                        for run in para.runs:
+                            if "Каллаш" in run.text or "Леонід" in run.text or "Юрійович" in run.text:
+                                run.text = run.text.replace("Каллаш", pib_parts[0] if len(pib_parts)>0 else "")
+                                run.text = run.text.replace("Леонід", pib_parts[1] if len(pib_parts)>1 else "")
+                                run.text = run.text.replace("Юрійович", pib_parts[2] if len(pib_parts)>2 else "")
 
-    with open(doc_path,"w",encoding="utf-8") as f:
-        f.write(content)
+    doc.save(out_docx)
 
-    pack_docx(unpack_dir, output_docx, template_path)
-    shutil.rmtree(tmpdir)
-    return output_docx
+    # ── Конвертація docx → PDF через LibreOffice ─────────────────────────────
+    lo_bin = None
+    for candidate in ["libreoffice", "soffice",
+                       "/usr/bin/libreoffice", "/usr/bin/soffice",
+                       "/usr/lib/libreoffice/program/soffice"]:
+        if shutil.which(candidate) or os.path.isfile(candidate):
+            lo_bin = candidate
+            break
+
+    if not lo_bin:
+        raise RuntimeError("LibreOffice не знайдено")
+
+    env = os.environ.copy()
+    env["HOME"] = tmpdir  # уникаємо конфліктів профілів
+
+    subprocess.run(
+        [lo_bin, "--headless", "--norestore",
+         "--convert-to", "pdf", "--outdir", tmpdir, out_docx],
+        check=True, capture_output=True, timeout=60, env=env
+    )
+
+    # LibreOffice зберігає як zayava.pdf
+    if not os.path.exists(out_pdf):
+        # Шукаємо будь-який pdf у tmpdir
+        for f in os.listdir(tmpdir):
+            if f.endswith(".pdf"):
+                out_pdf = os.path.join(tmpdir, f)
+                break
+
+    with open(out_pdf, "rb") as f:
+        data = f.read()
+
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    return data
+
+
+# Заглушки для сумісності
+def fill_template(params, template_path, output_docx): pass
+def docx_to_pdf(docx_path, output_pdf): pass
 
 
 if __name__ == "__main__":
     params = {
-        "pib":"Мацола Євгеній Володимирович","ipn":"3522908011",
-        "address":"Україна, обл. Закарпатська, р-н. Тячівський, с. Грушово, вул. Центральна, буд. 53-А",
-        "date":"","purpose_uk":"Передоплата за товар згідно з договором № 01/26 від 16.03.2026",
-        "amount":"5800.00","currency":"USD",
-        "iban_debit":"UA293220010000026006310115156",
-        "iban_credit":"UA353220010000026000370076190",
-        "iban_commission":"UA293220010000026006310115156",
+        "pib": "Мацола Євгеній Володимирович",
+        "ipn": "3522908011",
+        "address": "Україна, обл. Закарпатська, р-н. Тячівський, с. Грушово, вул. Центральна, буд. 53-А",
+        "date": "",
+        "purpose_uk": "Передоплата за товар згідно з договором № 01/26 від 16.03.2026, рахунком № PI2026031201 від 17.03.2026",
+        "amount": "5800.00", "currency": "USD",
+        "iban_debit":      "UA293220010000026006310115156",
+        "iban_credit":     "UA353220010000026000370076190",
+        "iban_commission": "UA293220010000026006310115156",
     }
-    out = "/tmp/test_fill.docx"
-    fill_template(params, "/home/claude/dovidka_app/template_valyuta.docx", out)
-    print(f"DOCX: {out}")
-    docx_to_pdf(out, "/tmp/test_fill.pdf")
-    print("PDF: /tmp/test_fill.pdf")
+    print("Генеруємо...")
+    pdf = build_zayava_pdf(params)
+    with open("/tmp/test_final.pdf","wb") as f:
+        f.write(pdf)
+    print(f"✅ PDF: {len(pdf)} bytes → /tmp/test_final.pdf")
