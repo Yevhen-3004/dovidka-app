@@ -370,7 +370,7 @@ def build_dovidka(pib, ipn, doc_date, balance_line):
 def build_zayava(params):
     sys.path.insert(0,BASE_DIR)
     import fill_valyuta as fv
-    return fv.build_zayava_pdf(params)
+    return fv.build_zayava_docx(params)
 
 
 def parse_request():
@@ -438,9 +438,10 @@ def gen_zayava():
         }
         pdf=build_zayava(params)
         safe=(p["pib"].split()[0] if p["pib"] else "doc")
-        return send_file(io.BytesIO(pdf),mimetype="application/pdf",
+        return send_file(io.BytesIO(pdf),
+                         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                          as_attachment=True,
-                         download_name=f"Zayava_{safe}_{doc_date.replace('.','_')}.pdf")
+                         download_name=f"Zayava_{safe}_{doc_date.replace('.','_')}.docx")
     except Exception as e:
         return jsonify({"error":str(e)}),500
 
