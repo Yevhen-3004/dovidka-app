@@ -9,7 +9,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY, TA_RIGHT
 from datetime import date
 import io, os, sys, tempfile, json
 
-app = Flask(__name__)
+app = Flask(__name__)  # v3.0 — no LibreOffice
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_VALYUTA = os.path.join(BASE_DIR, "template_valyuta.docx")
 
@@ -394,15 +394,7 @@ def parse_request():
 
 @app.route("/health")
 def health():
-    import shutil, os
-    lo = shutil.which("libreoffice") or shutil.which("soffice")
-    lo_file = os.path.isfile("/usr/bin/libreoffice")
-    return jsonify({
-        "status": "ok",
-        "libreoffice_which": lo,
-        "libreoffice_file": lo_file,
-        "path": os.environ.get("PATH",""),
-    })
+    return jsonify({"status":"ok","version":"3.0","engine":"python-docx"})
 
 @app.route("/")
 def index():
