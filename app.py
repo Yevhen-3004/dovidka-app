@@ -254,8 +254,8 @@ footer{margin-top:1.5rem;text-align:center;font-family:var(--mono);font-size:11p
   q('btn-zayava').addEventListener('click',function(){
     var err=validateZayava(); if(err){showMsg('err-msg',err);return;}
     setLoading(true); showMsg('ok-msg','Генеруємо заяву...');
-    downloadPdf('/gen/zayava','Zayava_'+pib0()+'.pdf')
-      .then(function(){showMsg('ok-msg','Заяву завантажено.')})
+    downloadPdf('/gen/zayava','Zayava_'+pib0()+'.docx')
+      .then(function(){showMsg('ok-msg','Заяву завантажено (Word .docx).')})
       .catch(function(e){showMsg('err-msg',e.message)})
       .finally(function(){setLoading(false)});
   });
@@ -267,7 +267,7 @@ footer{margin-top:1.5rem;text-align:center;font-family:var(--mono);font-size:11p
     downloadPdf('/gen/dovidka','Dovidka_'+p+'.pdf')
       .then(function(){
         showMsg('ok-msg','Генеруємо заяву...');
-        return downloadPdf('/gen/zayava','Zayava_'+p+'.pdf');
+        return downloadPdf('/gen/zayava','Zayava_'+p+'.docx');
       })
       .then(function(){showMsg('ok-msg','Обидва документи завантажено.')})
       .catch(function(e){showMsg('err-msg',e.message)})
