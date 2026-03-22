@@ -178,14 +178,14 @@ def build_zayava_docx(params):
     # ── T8: IBAN 3 (комісія) ──────────────────────────────────────────────
     replace_iban_tcs(get_tcs(T[8].rows[0]), iban_comm)
 
-    # ── T9 r0c2: ПІБ внизу ────────────────────────────────────────────────
+    # ── T9 r0c2: ПІБ внизу (параграф 4, run0) ───────────────────────────
     tc_pib_bot = get_tcs(T[9].rows[0])[2]
-    for wt in tc_pib_bot.findall('.//w:t', NS):
-        if 'Палажій' in (wt.text or '') or (wt.text and len(wt.text.strip()) > 5):
-            # Зберігаємо пробіли перед ПІБ
-            spaces = len(wt.text) - len(wt.text.lstrip())
-            wt.text = ' ' * spaces + pib
-            break
+    paras = tc_pib_bot.findall('.//w:p', NS)
+    if len(paras) > 4:
+        wts = paras[4].findall('.//w:t', NS)
+        if wts:
+            spaces = len(wts[0].text) - len(wts[0].text.lstrip()) if wts[0].text else 25
+            wts[0].text = ' ' * spaces + pib
 
     buf = io.BytesIO()
     doc.save(buf)
