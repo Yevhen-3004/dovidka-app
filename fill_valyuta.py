@@ -34,7 +34,10 @@ def get_date_parts(date_str):
         p = date_str.strip().split(".")
         d, m, y = int(p[0]), int(p[1]), int(p[2])
     else:
-        t = date.today(); d, m, y = t.day, t.month, t.year
+        from datetime import datetime, timezone, timedelta
+        kyiv = timezone(timedelta(hours=2))  # UTC+2 (взимку); влітку UTC+3
+        t = datetime.now(kyiv)
+        d, m, y = t.day, t.month, t.year
     return str(d), MONTHS_UK[m], str(y)
 
 
@@ -100,25 +103,26 @@ def build_zayava_docx(params):
     T = doc.tables
 
     # ── T0 r2c1: Дата ─────────────────────────────────────────────────────
-    # run3 = '\u200223  ' (день), run5 = ' березня', run6 = '\u20022026\u2002...'
+    # run3=день (' 23  '), run5=місяць (' березня'), run6=рік (' 2026 ')
     tc_date = get_tcs(T[0].rows[2])[1]
     runs = tc_date.findall('.//w:r', NS)
-    for run in runs:
-        wts = run.findall('w:t', NS)
-        full = ''.join(w.text or '' for w in wts)
-        if '23' in full and '\u2002' not in full and '"' not in full:
-            # run3: '\u200223  '
-            for w in wts:
-                if w.text and '23' in w.text:
-                    w.text = w.text.replace('23', day)
-        elif 'березня' in full:
-            for w in wts:
-                if w.text and 'березня' in w.text:
-                    w.text = w.text.replace('березня', month_uk)
-        elif '2026' in full:
-            for w in wts:
-                if w.text and '2026' in w.text:
-                    w.text = w.text.replace('2026', year)
+    if len(runs) > 3:
+        for wt in runs[3].findall('w:t', NS):
+            if wt.text:
+                # Замінюємо старий день (шукаємо будь-яке 2-значне число)
+                import re
+                wt.text = re.sub(r'\d+', day, wt.text, count=1)
+    if len(runs) > 5:
+        for wt in runs[5].findall('w:t', NS):
+            if wt.text:
+                for old_m in list(MONTHS_UK.values()):
+                    if old_m in wt.text:
+                        wt.text = wt.text.replace(old_m, month_uk)
+                        break
+    if len(runs) > 6:
+        for wt in runs[6].findall('w:t', NS):
+            if wt.text:
+                wt.text = re.sub(r'\d{4}', year, wt.text, count=1)
 
     # ── T0 r5c1: ПІБ вгорі ────────────────────────────────────────────────
     tc_pib = get_tcs(T[0].rows[5])[1]
